@@ -245,5 +245,26 @@ namespace APBD_TASK6.Controllers
             await updateCmd.ExecuteNonQueryAsync();
             return Ok(new { Message = "Appointment updated successfully." });
         }
+
+        [HttpDelete("{idAppointment:int}")]
+        public async Task<IActionResult> DeleteAppointment(int idAppointment)
+        {
+            await using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            await using var getCmd = new SqlCommand("SELECT Status FROM dbo.Appointments WHERE IdAppointment = @IdAppointment;", connection);
+            getCmd.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+
+            var statusObj = await getCmd.ExecuteScalarAsync();
+            if(statusObj is null) return NotFound(new ErrorResponseDto {Message = $"Appointment {idAppointment} not found."});
+            if(statusObj.ToString() == "Completed") return Conflict(new ErrorResponseDto { Message = "Cannot delete a completed appointment." });
+       
+            await using var deleteCmd = new SqlCommand("DELETE FROM dbo.Appointments WHERE IdAppointment = @IdAppointment;", connection);
+            deleteCmd.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+
+            await deleteCmd.ExecuteNonQueryAsync();
+
+            return NoContent();
+        }
     }
 }
