@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using System.Data;
+using System.Text;
 
 namespace APBD_TASK6.Controllers
 {
@@ -168,6 +169,81 @@ namespace APBD_TASK6.Controllers
             var newId = (int)(await insertCmd.ExecuteScalarAsync())!;
             return CreatedAtAction(nameof(GetAppointment), new {idAppointment = newId}, new {IdAppointment = newId});
 
+        }
+
+        [HttpPut("{idAppointment:int}")]
+        public async Task<IActionResult> UpdateAppointment(int idAppointment, [FromBody] UpdateAppointmentRequestDto dto) 
+        {
+            var validStatuses = new[]
+            {
+                "Scheduled", 
+                "Completed", 
+                "Cancelled"
+            };
+            if (!validStatuses.Contains(dto.Status)) return BadRequest(new ErrorResponseDto {Message = "Status must be one of: Scheduled, Completed, Cancelled."});
+            if (string.IsNullOrWhiteSpace(dto.Reason)) return BadRequest(new ErrorResponseDto {Message = "Reason cannot be empty."});
+
+            await using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            await using var getCmd = new SqlCommand("SELECT Status, AppointmentDate FROM dbo.Appointments WHERE IdAppointment = @IdAppointment;", connection);
+            getCmd.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+
+            await using var getReader = await getCmd.ExecuteReaderAsync();
+            if (!await getReader.ReadAsync()) return NotFound(new ErrorResponseDto {Message = $"Appointment {idAppointment} not found."});
+
+            var currentStatus = getReader.GetString(getReader.GetOrdinal("Status"));
+            var currentDate = getReader.GetDateTime(getReader.GetOrdinal("AppointmentDate"));
+            await getReader.CloseAsync();
+
+            if (currentStatus == "Completed" && dto.AppointmentDate != currentDate)
+                return Conflict(new ErrorResponseDto { Message = "Cannot change the date of a completed appointment." });
+
+            await using var patientCmd = new SqlCommand("SELECT COUNT(1) FROM dbo.Patients WHERE IdPatient = @IdPatient AND IsActive = 1;", connection);
+            patientCmd.Parameters.Add("@IdPatient", SqlDbType.Int).Value = dto.IdPatient;
+            if ((int)(await patientCmd.ExecuteScalarAsync())! == 0) return BadRequest(new ErrorResponseDto { Message = "Patient does not exist or is not active." });
+
+            await using var doctorCmd= new SqlCommand("SELECT COUNT(1) FROM dbo.Doctors WHERE IdDoctor = @IdDoctor AND IsActive = 1;", connection);
+            doctorCmd.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = dto.IdDoctor;
+            if ((int)(await doctorCmd.ExecuteScalarAsync())! == 0) return BadRequest(new ErrorResponseDto {Message = "Doctor does not exist or is not active."});
+
+            await using var conflictCmd = new SqlCommand("""
+                
+                SELECT COUNT(1)
+                FROM dbo.Appointments
+                WHERE IdDoctor = @IdDoctor
+                    AND AppointmentDate = @AppointmentDate
+                    AND Status = N'Scheduled'
+                    AND IdAppointment <> @IdAppointment;
+                
+                """, connection);
+
+            conflictCmd.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = dto.IdDoctor;
+            conflictCmd.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value = dto.AppointmentDate;
+            conflictCmd.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+            if ((int)(await conflictCmd.ExecuteScalarAsync())! > 0) return Conflict(new ErrorResponseDto {Message = "Doctor already has an appointment at that time."});
+
+            await using var updateCmd = new SqlCommand("""
+            UPDATE dbo.Appointments
+            SET IdPatient = @IdPatient,
+                IdDoctor = @IdDoctor,
+                AppointmentDate = @AppointmentDate,
+                Status = @Status,
+                Reason = @Reason,
+                InternalNotes = @InternalNotes
+            WHERE IdAppointment = @IdAppointment;
+            """, connection);
+
+            updateCmd.Parameters.Add("@IdPatient", SqlDbType.Int).Value = dto.IdPatient;
+            updateCmd.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = dto.IdDoctor;
+            updateCmd.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value = dto.AppointmentDate;
+            updateCmd.Parameters.Add("@Status", SqlDbType.NVarChar, 30).Value = dto.Status;
+            updateCmd.Parameters.Add("@Reason", SqlDbType.NVarChar, 250).Value = dto.Reason;
+            updateCmd.Parameters.Add("@InternalNotes", SqlDbType.NVarChar, 500).Value = (object?)dto.InternalNotes ?? DBNull.Value;
+            updateCmd.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+        
+            await updateCmd.ExecuteNonQueryAsync();
+            return Ok(new { Message = "Appointment updated successfully." });
         }
     }
 }
